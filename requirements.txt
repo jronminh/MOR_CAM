@@ -1,0 +1,9 @@
+# Xac minh tren Windows, Python 3.11.16, 2026-08-28.
+# harvesters chi co wheel bien san toi CPython 3.11 (manylinux2014_x86_64 /
+# win_amd64) tai thoi diem cai dat nay - dung Python 3.10 hoac 3.11, KHONG
+# dung 3.12 tro len.
+
+harvesters==1.4.3     # genicam la phu thuoc, tu dong cai theo (xac minh: 1.5.1)
+numpy>=2
+opencv-python>=4.9    # luu TIFF 16-bit, focus score (Laplacian), preview GUI
+PyYAML>=6

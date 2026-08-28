@@ -1,0 +1,16 @@
+# Anh chup va metadata do capture.py sinh ra khi chay - khong phai source,
+# tai tao duoc bat cu luc nao bang `python capture.py capture`.
+captures/
+preview_latest.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db

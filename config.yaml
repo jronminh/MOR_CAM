@@ -1,0 +1,57 @@
+# Camera: Hikrobot MV-CE200-10GM, serial 00F67674995, firmware V3.1.1 200717
+# Ten node va gia tri da xac minh tu node map that (camera_report.md, 2026-08-28).
+
+camera:
+  serial: "00F67674995"    # de trong ("") -> lay thiet bi dau tien do duoc
+  ip: 192.168.100.253
+
+gentl:
+  # Windows: da xac minh (tu GENICAM_GENTL64_PATH)
+  cti_windows: "C:/Program Files (x86)/Common Files/MVS/Runtime/Win64_x64/MvProducerGEV.cti"
+  # Linux: CHUA xac minh (dump chay tren Windows). Dinh vi trong MVS SDK Linux roi dien.
+  cti_linux: "DIEN_SAU_KHI_DINH_VI/MvProducerGEV.cti"
+
+acquisition:
+  # PixelFormat enum that: Mono8, Mono10, Mono10Packed, Mono12, Mono12Packed
+  # Dung ban unpacked. Mono12 du dai dong va khong can giai nen.
+  pixel_format: Mono12
+  exposure_us: 10000        # node ExposureTime (Float, us), dai [46, 2000000]. Chinh theo canh de tranh bao hoa.
+  gain_db: 0.0              # node Gain (Float, dB), dai [0, 19.9963]. Giu 0 dB cho nhieu thap nhat.
+  binning_h: 1             # node BinningHorizontal (Enum): 1 | 2 | 4 -- DIGITAL, khong phai on-sensor
+  binning_v: 1             # node BinningVertical (Enum): 1 | 2 | 4 -- DIGITAL, khong phai on-sensor
+
+# Cac node ISP can ep ve trang thai tat + doc lai xac nhan.
+enforce_linear:
+  gamma_enable: false       # node GammaEnable (Boolean). Hien tai da False.
+  auto_exposure: Off        # node ExposureAuto (Enum): Off | Once | Continuous
+  auto_gain: Off            # node GainAuto (Enum): Off | Once | Continuous
+  lut_enable: false         # node LUTEnable (Boolean). Hien tai da False.
+  exposure_mode: Timed      # node ExposureMode (Enum): chi co gia tri Timed
+  # Noise reduction: node DigitalNoiseReductionMode co access NI (Not Implemented)
+  # trong firmware nay. Khong set duoc va nhieu kha nang khong hoat dong.
+  # Ghi log "khong co node NR kha dung de tat", KHONG coi la loi.
+
+# Black level: PEDESTAL dang bat. Day la diem then chot, xem capture_bindings_and_issues.md muc 2.
+black_level:
+  # node BlackLevel (Integer) = 200 tren [0,4095]; BlackLevelEnable (Boolean) = True.
+  # Offset nay KHONG triet tieu trong do tuong phan Weber. Bat buoc ghi metadata + tru dark frame sau.
+  mode: keep_and_record     # keep_and_record | set_zero
+  value: 200                # dung khi mode=keep_and_record: ghim ve gia tri co dinh nay, ghi vao metadata
+
+output:
+  dir: ./captures
+  image_format: tiff16      # tiff16 | npy. Giu nguyen bit depth cho Mono12 (gia tri [0,4095]).
+  also_save_npy: false
+  write_metadata_json: true
+
+preview:
+  enable: true
+  mode: auto                # auto | gui | headless_score
+  fps_limit: 5
+  downscale: 4
+  preview_image_path: ./preview_latest.png
+
+network:
+  # node GevSCPSPacketSize hien tai = 8164 (jumbo), dai [220, 9156].
+  # Tren Linux: dat MTU cua NIC >= packet size (vd MTU 9000) de tranh mat goi.
+  packet_size: 8164
