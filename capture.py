@@ -1,12 +1,13 @@
 """
 capture.py - chuong trinh chinh: ket noi camera GigE (Hikrobot MV-CE200-10GM),
 ep + xac minh cac thong so linearity-critical, chup mot khung theo lenh, luu
-anh giu nguyen bit depth + metadata. Co subcommand "focus" cho canh net truc
-tiep. Chay duoc tren Windows va Linux, chi khac duong dan .cti trong config.
+anh giu nguyen bit depth + metadata. Toan bo tham so duoc dieu khien qua CLI
+argparse - khong con file config ngoai.
 
 Su dung:
-    python capture.py capture [--config config.yaml] [--outdir DIR]
-    python capture.py focus   [--config config.yaml] [--mode auto|gui|headless_score]
+    python capture.py [--ip IP | --serial SERIAL] [--pixel-format Mono8|Mono10|Mono12]
+                       [--exposure-us US] [--gain-db DB] [--outdir DIR] ...
+    python capture.py --help    # xem toan bo flag
 
 Toan bo ten node GenICam dung o day da xac minh tren camera that qua
 camera_info.py (xem node_map_full.json, reference/camera_report.md,
@@ -17,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import signal
 import sys
 from datetime import datetime, timezone
@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
 
 import gev_camera as gc
 
@@ -64,18 +63,16 @@ def add_file_logging(log_dir: str, command: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Config: gia tri mac dinh an toan. Truong nao trong file YAML khong co se
-# dung mac dinh o day, va duoc log ro (yeu cau 5.2).
+# Config: gia tri mac dinh an toan, dung lam schema noi bo + fallback khi
+# mot flag CLI khong duoc chi dinh.
 # ---------------------------------------------------------------------------
 DEFAULTS: dict[str, Any] = {
     "camera": {"serial": None, "ip": None},
-    "gentl": {"cti_windows": None, "cti_linux": None},
+    "gentl": {"cti": None},
     "acquisition": {
         "pixel_format": "Mono8",   # an toan nhat, khong can giai nen, luon duoc ho tro
         "exposure_us": 10000.0,
         "gain_db": 0.0,
-        "binning_h": 1,
-        "binning_v": 1,
     },
     "enforce_linear": {
         "gamma_enable": False,
@@ -92,71 +89,71 @@ DEFAULTS: dict[str, Any] = {
         "also_save_npy": False,
         "write_metadata_json": True,
     },
-    "preview": {
-        "enable": True,
-        "mode": "auto",
-        "fps_limit": 5,
-        "downscale": 4,
-        "preview_image_path": "./preview_latest.png",
-    },
     "network": {"packet_size": None},
-    "logging": {"enable": True, "dir": DEFAULT_LOG_DIR},
+    "logging": {"dir": DEFAULT_LOG_DIR},
 }
 
 
-def _deep_merge_with_defaults(defaults: dict, user: dict, path: str = "") -> dict:
-    out = {}
-    for key, default_val in defaults.items():
-        full_key = f"{path}.{key}" if path else key
-        if key not in user or user[key] is None:
-            if isinstance(default_val, dict):
-                out[key] = _deep_merge_with_defaults(default_val, {}, full_key)
-            else:
-                log.info("config: '%s' khong duoc chi dinh, dung mac dinh: %r", full_key, default_val)
-                out[key] = default_val
-        elif isinstance(default_val, dict) and isinstance(user[key], dict):
-            out[key] = _deep_merge_with_defaults(default_val, user[key], full_key)
-        else:
-            out[key] = user[key]
-    # giu lai cac key nguoi dung co ma default khong dinh nghia (vd cac ghi chu rieng)
-    for key, val in user.items():
-        if key not in out:
-            out[key] = val
-    return out
+def config_from_args(args: argparse.Namespace) -> dict:
+    """Dung dict config (cung hinh dang DEFAULTS) truc tiep tu cac flag CLI
+    da parse - thay cho viec doc config.yaml."""
+    return {
+        "camera": {"serial": args.serial, "ip": args.ip},
+        "gentl": {"cti": args.cti},
+        "acquisition": {
+            "pixel_format": args.pixel_format,
+            "exposure_us": args.exposure_us,
+            "gain_db": args.gain_db,
+        },
+        "enforce_linear": {
+            "gamma_enable": args.gamma_enable,
+            "auto_exposure": args.auto_exposure,
+            "auto_gain": args.auto_gain,
+            "lut_enable": args.lut_enable,
+            "exposure_mode": args.exposure_mode,
+        },
+        "black_level": {"mode": args.black_level_mode, "value": args.black_level_value},
+        "roi": {
+            "width": args.roi_width,
+            "height": args.roi_height,
+            "x_offset": args.roi_x_offset,
+            "y_offset": args.roi_y_offset,
+        },
+        "output": {
+            "dir": args.outdir,
+            "image_format": args.image_format,
+            "also_save_npy": args.save_npy,
+            "write_metadata_json": args.metadata,
+        },
+        "network": {"packet_size": args.packet_size},
+        "logging": {"dir": args.log_dir},
+    }
 
 
-class _ConfigYamlLoader(yaml.SafeLoader):
-    """YAML 1.1 (PyYAML SafeLoader mac dinh) doc 'Off'/'On'/'Yes'/'No' nhu
-    boolean, nhung config.yaml dung 'Off'/'On' lam GIA TRI ENUM GenICam
-    (vd ExposureAuto: Off). Bo cac tu khoa on/off/yes/no khoi bo nhan dien
-    boolean ngam dinh, chi giu true/false that su la boolean - de "Off"/
-    "On" doc dung la chuoi, khong bi ep thanh False/True."""
-
-
-_ConfigYamlLoader.yaml_implicit_resolvers = {
-    first_char: [r for r in resolvers if r[0] != "tag:yaml.org,2002:bool"]
-    for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
-}
-_ConfigYamlLoader.add_implicit_resolver(
-    "tag:yaml.org,2002:bool",
-    re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
-    list("tTfF"),
-)
-
-
-def load_config(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        user_cfg = yaml.load(f, Loader=_ConfigYamlLoader) or {}
-    return _deep_merge_with_defaults(DEFAULTS, user_cfg)
+def _warn_unwired_fields(config: dict) -> None:
+    """3 field nay hien dien trong CLI/schema nhung chua co code nao ap dung
+    len camera/file that su. Canh bao ro de nguoi dung khong tuong nham la
+    da co hieu luc."""
+    if config["output"]["image_format"] != DEFAULTS["output"]["image_format"]:
+        log.warning(
+            "--image-format=%s: CHUA duoc wired-up, anh van luon ghi .tiff (xem save_image()).",
+            config["output"]["image_format"])
+    if config["network"]["packet_size"] is not None:
+        log.warning(
+            "--packet-size=%s: CHUA duoc wired-up, khong co code nao set GevSCPSPacketSize len camera.",
+            config["network"]["packet_size"])
+    if config["black_level"]["value"] is not None and config["black_level"]["mode"] != "set_zero":
+        log.warning(
+            "--black-level-value=%s: CHUA duoc wired-up khi black-level-mode=%s "
+            "(chi mode=set_zero moi ghi gia tri, va luon ghi 0 chu khong doc field nay).",
+            config["black_level"]["value"], config["black_level"]["mode"])
 
 
 def cti_path_for_platform(config: dict) -> str:
-    import platform
-    key = "cti_windows" if platform.system() == "Windows" else "cti_linux"
-    explicit = config["gentl"].get(key)
+    explicit = config["gentl"].get("cti")
     path, source = gc.find_cti(explicit)
     if explicit and path == explicit:
-        source = f"config.gentl.{key}"
+        source = "--cti"
     return path
 
 
@@ -241,28 +238,16 @@ def apply_adjustable(node_map, config: dict) -> dict:
     results["gain_db"] = gc.set_float_and_verify(
         node_map, ["Gain"], float(acq["gain_db"]), "Gain")
 
-    results["binning_h"] = _apply_binning(node_map, "BinningHorizontal", int(acq["binning_h"]), "ngang")
-    results["binning_v"] = _apply_binning(node_map, "BinningVertical", int(acq["binning_v"]), "doc")
+    # Binning khong dung: luon ep ve 1x1 (pixel goc, khong gop pixel) va xac
+    # minh, khong cho chinh qua CLI - xem reference/capture_bindings_and_issues.md muc 3.
+    gc.set_enum_and_verify(node_map, ["BinningHorizontal"], "BinningHorizontal1", "Binning ngang")
+    gc.set_enum_and_verify(node_map, ["BinningVertical"], "BinningVertical1", "Binning doc")
 
     results["black_level"] = _apply_black_level(node_map, config["black_level"])
 
     results["roi"] = _apply_roi(node_map, config["roi"])
 
     return results
-
-
-def _apply_binning(node_map, node_name: str, multiplier: int, label_vn: str) -> dict:
-    if multiplier not in (1, 2, 4):
-        raise gc.ParameterError(f"Binning {label_vn}: gia tri {multiplier} khong hop le (chi 1/2/4)")
-    enum_value = f"{node_name}{multiplier}"
-    result = gc.set_enum_and_verify(node_map, [node_name], enum_value, f"Binning {label_vn}")
-    if multiplier != 1:
-        log.warning(
-            "Binning %s = %s: day la binning DIGITAL (Region0), KHONG phai on-sensor - "
-            "BinningSelector.Sensor co access NI tren camera nay. Khong cai thien SNR nhu "
-            "on-sensor binning; chi giam dung luong luu tru. Xem reference/capture_bindings_and_issues.md muc 3.",
-            label_vn, enum_value)
-    return result
 
 
 def _apply_black_level(node_map, cfg: dict) -> dict:
@@ -407,35 +392,23 @@ def save_image(arr: np.ndarray, info: dict, out_dir: Path, base_name: str, confi
     }
 
 
-def build_metadata(device_info: dict, linear_results: dict, adjustable_results: dict,
-                    capture_info: dict, save_info: dict) -> dict:
+def build_metadata(device_info: dict, linear_results: dict, adjustable_results: dict) -> dict:
+    black_level = adjustable_results["black_level"]
     return {
-        "timestamp_host_utc": datetime.now(timezone.utc).isoformat(),
-        "timestamp_camera": {
-            "ticks": capture_info["timestamp_camera_ticks"],
-            "ns": capture_info["timestamp_camera_ns"],
-            "tick_frequency_hz": capture_info["timestamp_camera_tick_frequency_hz"],
-        },
-        "device": device_info,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "device_serial": device_info["serial"],
+        "device_firmware": device_info["firmware"],
         "pixel_format": adjustable_results["pixel_format"]["value"],
         "exposure_us": adjustable_results["exposure_us"]["value"],
         "gain_db": adjustable_results["gain_db"]["value"],
-        "binning_h": adjustable_results["binning_h"]["value"],
-        "binning_v": adjustable_results["binning_v"]["value"],
-        "binning_is_on_sensor": False,
-        "roi": adjustable_results["roi"],
-        "black_level": adjustable_results["black_level"],
-        "linearity_readback": {
-            k: v for k, v in linear_results.items()
-        },
-        "frame": {
-            "width": capture_info["width"],
-            "height": capture_info["height"],
-            "frame_id": capture_info["frame_id"],
-            "is_complete": capture_info["is_complete"],
-        },
-        "packet_loss": capture_info["packet_loss"],
-        "image": save_info,
+        "black_level_mode": black_level["mode"],
+        "black_level": black_level["value"],
+        "black_level_enable": black_level["enable"],
+        "gamma_enable": linear_results["gamma_enable"]["value"],
+        "auto_exposure": linear_results["auto_exposure"]["value"],
+        "auto_gain": linear_results["auto_gain"]["value"],
+        "lut_enable": linear_results["lut_enable"]["value"],
+        "exposure_mode": linear_results["exposure_mode"]["value"],
     }
 
 
@@ -453,12 +426,9 @@ def read_device_info(node_map) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: capture
+# Chup mot khung
 # ---------------------------------------------------------------------------
 def cmd_capture(args: argparse.Namespace, config: dict) -> int:
-    if args.outdir:
-        config["output"]["dir"] = args.outdir
-
     cti_path = cti_path_for_platform(config)
     log.info("Dung .cti: %s", cti_path)
 
@@ -499,7 +469,7 @@ def cmd_capture(args: argparse.Namespace, config: dict) -> int:
                  save_info["min"], save_info["max"])
 
         if config["output"]["write_metadata_json"]:
-            meta = build_metadata(device_info, linear_results, adjustable_results, capture_info, save_info)
+            meta = build_metadata(device_info, linear_results, adjustable_results)
             meta_path = out_dir / f"{base_name}.json"
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2, default=str)
@@ -512,67 +482,75 @@ def cmd_capture(args: argparse.Namespace, config: dict) -> int:
             log.info("Da dong ket noi camera va giai phong Harvester.")
 
 
-# ---------------------------------------------------------------------------
-# Subcommand: focus (uy quyen cho focus.py)
-# ---------------------------------------------------------------------------
-def cmd_focus(args: argparse.Namespace, config: dict) -> int:
-    import focus as focus_mod
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    if args.mode:
-        config["preview"]["mode"] = args.mode
+    cam = parser.add_argument_group("Camera")
+    cam.add_argument("--ip", default=DEFAULTS["camera"]["ip"], help="IP camera. Bo trong de dung serial hoac thiet bi dau tien do duoc.")
+    cam.add_argument("--serial", default=DEFAULTS["camera"]["serial"], help="Serial camera.")
+    cam.add_argument("--cti", default=DEFAULTS["gentl"]["cti"], help="Duong dan .cti tuong minh. Bo trong de tu do tim.")
 
-    cti_path = cti_path_for_platform(config)
-    log.info("Dung .cti: %s", cti_path)
+    acq = parser.add_argument_group("Acquisition")
+    acq.add_argument("--pixel-format", choices=["Mono8", "Mono10", "Mono12"],
+                      default=DEFAULTS["acquisition"]["pixel_format"])
+    acq.add_argument("--exposure-us", type=float, default=DEFAULTS["acquisition"]["exposure_us"])
+    acq.add_argument("--gain-db", type=float, default=DEFAULTS["acquisition"]["gain_db"])
 
-    h = ia = None
-    try:
-        h, ia = gc.connect_control(cti_path, config["camera"].get("ip"), config["camera"].get("serial"))
-        node_map = ia.remote_device.node_map
+    lin = parser.add_argument_group("Linearity-critical (enforce_linear)")
+    lin.add_argument("--gamma-enable", dest="gamma_enable", action="store_true",
+                      default=DEFAULTS["enforce_linear"]["gamma_enable"])
+    lin.add_argument("--no-gamma-enable", dest="gamma_enable", action="store_false")
+    lin.add_argument("--auto-exposure", choices=["Off", "Once", "Continuous"],
+                      default=DEFAULTS["enforce_linear"]["auto_exposure"])
+    lin.add_argument("--auto-gain", choices=["Off", "Once", "Continuous"],
+                      default=DEFAULTS["enforce_linear"]["auto_gain"])
+    lin.add_argument("--lut-enable", dest="lut_enable", action="store_true",
+                      default=DEFAULTS["enforce_linear"]["lut_enable"])
+    lin.add_argument("--no-lut-enable", dest="lut_enable", action="store_false")
+    lin.add_argument("--exposure-mode", choices=["Timed"], default=DEFAULTS["enforce_linear"]["exposure_mode"])
 
-        log.info("--- Ep va xac minh thong so linearity-critical (che do focus cung ap dung) ---")
-        try:
-            enforce_linear(node_map, config)
-        except gc.ParameterError as e:
-            log.error("KHONG the ep thong so linearity-critical: %s. DUNG.", e)
-            return 2
+    bl = parser.add_argument_group("Black level")
+    bl.add_argument("--black-level-mode", choices=["keep_and_record", "set_zero"],
+                     default=DEFAULTS["black_level"]["mode"])
+    bl.add_argument("--black-level-value", type=int, default=DEFAULTS["black_level"]["value"],
+                     help="CHUA wired-up (xem canh bao khi chay).")
 
-        gc.set_enum_and_verify(node_map, ["PixelFormat"], str(config["acquisition"]["pixel_format"]), "Pixel format")
-        _apply_roi(node_map, config["roi"])
+    roi = parser.add_argument_group("ROI")
+    roi.add_argument("--roi-width", type=int, default=DEFAULTS["roi"]["width"], help="Bo trong = full sensor.")
+    roi.add_argument("--roi-height", type=int, default=DEFAULTS["roi"]["height"], help="Bo trong = full sensor.")
+    roi.add_argument("--roi-x-offset", type=int, default=DEFAULTS["roi"]["x_offset"])
+    roi.add_argument("--roi-y-offset", type=int, default=DEFAULTS["roi"]["y_offset"])
 
-        focus_mod.run_focus(ia, node_map, config)
-        return 0
-    finally:
-        if h is not None:
-            gc.disconnect_control(h, ia)
-            log.info("Da dong ket noi camera va giai phong Harvester.")
+    out = parser.add_argument_group("Output")
+    out.add_argument("--outdir", default=DEFAULTS["output"]["dir"])
+    out.add_argument("--image-format", choices=["tiff16", "npy"], default=DEFAULTS["output"]["image_format"],
+                      help="CHUA wired-up, anh luon ghi .tiff (xem canh bao khi chay).")
+    out.add_argument("--save-npy", dest="save_npy", action="store_true",
+                      default=DEFAULTS["output"]["also_save_npy"])
+    out.add_argument("--no-save-npy", dest="save_npy", action="store_false")
+    out.add_argument("--metadata", dest="metadata", action="store_true",
+                      default=DEFAULTS["output"]["write_metadata_json"])
+    out.add_argument("--no-metadata", dest="metadata", action="store_false")
+
+    net = parser.add_argument_group("Network")
+    net.add_argument("--packet-size", type=int, default=DEFAULTS["network"]["packet_size"],
+                      help="CHUA wired-up (xem canh bao khi chay).")
+
+    log_grp = parser.add_argument_group("Logging")
+    log_grp.add_argument("--log-dir", default=DEFAULTS["logging"]["dir"],
+                          help="Thu muc ghi file log chi tiet. Truyen '' de tat file log.")
+
+    return parser
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest="command", required=True)
+    args = _build_arg_parser().parse_args()
+    config = config_from_args(args)
+    _warn_unwired_fields(config)
 
-    p_capture = sub.add_parser("capture", help="Chup mot khung va luu anh + metadata")
-    p_capture.add_argument("--config", default="config.yaml")
-    p_capture.add_argument("--outdir", default=None, help="Ghi de output.dir trong config")
-    p_capture.add_argument("--log-dir", default=None,
-                            help="Ghi de logging.dir trong config. Truyen '' de tat file log.")
-    p_capture.set_defaults(func=cmd_capture)
-
-    p_focus = sub.add_parser("focus", help="Canh net truc tiep (streaming lien tuc, tai gioi han)")
-    p_focus.add_argument("--config", default="config.yaml")
-    p_focus.add_argument("--mode", choices=["auto", "gui", "headless_score"], default=None)
-    p_focus.add_argument("--log-dir", default=None,
-                          help="Ghi de logging.dir trong config. Truyen '' de tat file log.")
-    p_focus.set_defaults(func=cmd_focus)
-
-    args = parser.parse_args()
-
-    config = load_config(args.config)
-
-    log_dir = args.log_dir if args.log_dir is not None else config["logging"]["dir"]
-    if config["logging"]["enable"] and log_dir:
+    if args.log_dir:
         try:
-            log_file = add_file_logging(log_dir, args.command)
+            log_file = add_file_logging(args.log_dir, "capture")
             log.info("Ghi log chi tiet (muc DEBUG) vao: %s", log_file)
         except OSError as e:
             log.warning("Khong tao duoc file log (%s), tiep tuc chi voi console.", e)
@@ -584,7 +562,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_sigint)
 
     try:
-        return args.func(args, config)
+        return cmd_capture(args, config)
     except KeyboardInterrupt:
         log.warning("Da dung boi nguoi dung (Ctrl-C).")
         return 130
