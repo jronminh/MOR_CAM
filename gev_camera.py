@@ -8,7 +8,7 @@ Gom lai o day vi camera_info.py, capture.py va focus.py deu can:
   - cac ham doc/ghi node GenICam co xac minh read-back.
 
 Tat ca da duoc thu truc tiep tren camera that trong qua trinh phat trien
-(xem capture_bindings_and_issues.md va camera_report.md). Khong doan ten
+(xem reference/capture_bindings_and_issues.md va reference/camera_report.md). Khong doan ten
 node: moi ham set-and-verify deu doc lai tu node map that va bao loi ro
 neu khong dung nhu ky vong.
 """
@@ -82,7 +82,7 @@ def find_cti(explicit_path: Optional[str] = None) -> tuple[str, str]:
 
 # ---------------------------------------------------------------------------
 # Vong qua 2 loi UnicodeDecodeError trong MvProducerGEV.cti (xac minh tren
-# camera that, xem capture_bindings_and_issues.md muc 4):
+# camera that, xem reference/capture_bindings_and_issues.md muc 4):
 #   (1) doc node map cua *local TL device* (truoc khi cham toi node map that
 #       cua camera) tra ve URL khong phai UTF-8 hop le.
 #   (2) ImageAcquirer dang ky module event (System/Interface/Device) khi mo

@@ -9,8 +9,8 @@ Su dung:
     python capture.py focus   [--config config.yaml] [--mode auto|gui|headless_score]
 
 Toan bo ten node GenICam dung o day da xac minh tren camera that qua
-camera_info.py (xem node_map_full.json, camera_report.md,
-capture_bindings_and_issues.md). Khong doan/hard-code khi chua tra cuu.
+camera_info.py (xem node_map_full.json, reference/camera_report.md,
+reference/capture_bindings_and_issues.md). Khong doan/hard-code khi chua tra cuu.
 """
 from __future__ import annotations
 
@@ -29,8 +29,38 @@ import yaml
 
 import gev_camera as gc
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+# Console: muc INFO, dinh dang gon - giu nguyen hanh vi cu (truoc day dung
+# logging.basicConfig, cac module khac nhu gui.py/focus.py dang phu thuoc
+# vao viec root logger co san handler nay khi import capture.py).
+_console_handler = logging.StreamHandler()
+_console_handler.setLevel(logging.INFO)
+_console_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+logging.getLogger().addHandler(_console_handler)
+logging.getLogger().setLevel(logging.DEBUG)
+
 log = logging.getLogger("capture")
+
+DEFAULT_LOG_DIR = "./logs"
+
+
+def add_file_logging(log_dir: str, command: str) -> Path:
+    """Them file log chi tiet (muc DEBUG, co timestamp, ten logger) ben canh
+    console. Console chi in tu INFO tro len (khong doi), nhung file log ghi
+    ca cac dong DEBUG - vi du so lan retry cua fetch_buffer_retrying() khi
+    gap loi UnicodeDecodeError cua MvProducerGEV.cti (xem
+    reference/capture_bindings_and_issues.md muc 4) - de xem lai lich su chay va debug
+    sau nay ma khong can bat lai --verbose."""
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    file_path = log_path / f"{command}_{ts}.log"
+
+    handler = logging.FileHandler(file_path, encoding="utf-8")
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    logging.getLogger().addHandler(handler)
+
+    return file_path
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +100,7 @@ DEFAULTS: dict[str, Any] = {
         "preview_image_path": "./preview_latest.png",
     },
     "network": {"packet_size": None},
+    "logging": {"enable": True, "dir": DEFAULT_LOG_DIR},
 }
 
 
@@ -229,7 +260,7 @@ def _apply_binning(node_map, node_name: str, multiplier: int, label_vn: str) -> 
         log.warning(
             "Binning %s = %s: day la binning DIGITAL (Region0), KHONG phai on-sensor - "
             "BinningSelector.Sensor co access NI tren camera nay. Khong cai thien SNR nhu "
-            "on-sensor binning; chi giam dung luong luu tru. Xem capture_bindings_and_issues.md muc 3.",
+            "on-sensor binning; chi giam dung luong luu tru. Xem reference/capture_bindings_and_issues.md muc 3.",
             label_vn, enum_value)
     return result
 
@@ -251,7 +282,7 @@ def _apply_black_level(node_map, cfg: dict) -> dict:
     log.warning(
         "Black level = %s (BlackLevelEnable=%s): day la pedestal CONG THEM vao moi pixel, KHONG "
         "triet tieu trong tuong phan Weber. Da ghi vao metadata; buoc calibration sau phai tru "
-        "dark frame. Xem capture_bindings_and_issues.md muc 2.",
+        "dark frame. Xem reference/capture_bindings_and_issues.md muc 2.",
         value_result["value"], enable_val)
 
     return {
@@ -347,7 +378,7 @@ def save_image(arr: np.ndarray, info: dict, out_dir: Path, base_name: str, confi
         raise NotImplementedError(
             f"pixel_format={data_format} la dinh dang packed. Giai nen packed 10/12-bit CHUA duoc "
             "cai dat trong PoC nay (rui ro giai sai bit-layout im lang). Dung ban unpacked "
-            "(Mono10/Mono12) - da xac nhan camera nay ho tro (xem camera_report.md)."
+            "(Mono10/Mono12) - da xac nhan camera nay ho tro (xem reference/camera_report.md)."
         )
     if data_format not in UNPACKED_DTYPE:
         raise NotImplementedError(f"pixel_format={data_format} chua duoc ho tro de luu trong PoC nay.")
@@ -424,8 +455,7 @@ def read_device_info(node_map) -> dict:
 # ---------------------------------------------------------------------------
 # Subcommand: capture
 # ---------------------------------------------------------------------------
-def cmd_capture(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
+def cmd_capture(args: argparse.Namespace, config: dict) -> int:
     if args.outdir:
         config["output"]["dir"] = args.outdir
 
@@ -485,10 +515,9 @@ def cmd_capture(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Subcommand: focus (uy quyen cho focus.py)
 # ---------------------------------------------------------------------------
-def cmd_focus(args: argparse.Namespace) -> int:
+def cmd_focus(args: argparse.Namespace, config: dict) -> int:
     import focus as focus_mod
 
-    config = load_config(args.config)
     if args.mode:
         config["preview"]["mode"] = args.mode
 
@@ -525,14 +554,28 @@ def main() -> int:
     p_capture = sub.add_parser("capture", help="Chup mot khung va luu anh + metadata")
     p_capture.add_argument("--config", default="config.yaml")
     p_capture.add_argument("--outdir", default=None, help="Ghi de output.dir trong config")
+    p_capture.add_argument("--log-dir", default=None,
+                            help="Ghi de logging.dir trong config. Truyen '' de tat file log.")
     p_capture.set_defaults(func=cmd_capture)
 
     p_focus = sub.add_parser("focus", help="Canh net truc tiep (streaming lien tuc, tai gioi han)")
     p_focus.add_argument("--config", default="config.yaml")
     p_focus.add_argument("--mode", choices=["auto", "gui", "headless_score"], default=None)
+    p_focus.add_argument("--log-dir", default=None,
+                          help="Ghi de logging.dir trong config. Truyen '' de tat file log.")
     p_focus.set_defaults(func=cmd_focus)
 
     args = parser.parse_args()
+
+    config = load_config(args.config)
+
+    log_dir = args.log_dir if args.log_dir is not None else config["logging"]["dir"]
+    if config["logging"]["enable"] and log_dir:
+        try:
+            log_file = add_file_logging(log_dir, args.command)
+            log.info("Ghi log chi tiet (muc DEBUG) vao: %s", log_file)
+        except OSError as e:
+            log.warning("Khong tao duoc file log (%s), tiep tuc chi voi console.", e)
 
     def _on_sigint(signum, frame):
         log.warning("Nhan Ctrl-C, dang don dep...")
@@ -541,7 +584,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_sigint)
 
     try:
-        return args.func(args)
+        return args.func(args, config)
     except KeyboardInterrupt:
         log.warning("Da dung boi nguoi dung (Ctrl-C).")
         return 130

@@ -1,7 +1,8 @@
-# Anh chup va metadata do capture.py sinh ra khi chay - khong phai source,
-# tai tao duoc bat cu luc nao bang `python capture.py capture`.
+# Anh chup, metadata va file log do capture.py sinh ra khi chay - khong
+# phai source, tai tao duoc bat cu luc nao bang `python capture.py capture`.
 captures/
 preview_latest.png
+logs/
 
 # Python
 __pycache__/

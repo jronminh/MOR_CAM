@@ -5,7 +5,7 @@ focus.py - che do canh net truc tiep (live focus mode), goi tu
 Dung streaming lien tuc (AcquisitionMode=Continuous) nhung co gioi han tai:
 giam do phan giai preview (downscale) va gioi han fps (fps_limit) o phia
 client. Day la che do CHI dung khi co nguoi thao tac canh net, khong dung
-cho van hanh khong nguoi truc (xem poc_camera_bringup_spec.md muc 5.6/6.1:
+cho van hanh khong nguoi truc (xem reference/poc_camera_bringup_spec.md muc 5.6/6.1:
 tren mini PC 2 nhan, GVSP xu ly o userspace lam nghen CPU neu streaming
 lien tuc khong gioi han).
 

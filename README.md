@@ -1,7 +1,7 @@
 # MOR CAM - PoC dua camera GigE vao hoat dong
 
 Camera: **Hikrobot MV-CE200-10GM** (sensor Sony IMX183, 20MP mono, GigE Vision, PoE).
-Dac ta day du: `poc_camera_bringup_spec.md`. Cac file:
+Dac ta day du: `reference/poc_camera_bringup_spec.md`. Cac file:
 
 | File | Vai tro |
 |---|---|
@@ -9,10 +9,10 @@ Dac ta day du: `poc_camera_bringup_spec.md`. Cac file:
 | `camera_info.py` | Dump toan bo node map (chi doc) - **chay truoc tien** khi dem camera moi/firmware moi ve. |
 | `capture.py` | Chuong trinh chinh: ep thong so linearity-critical, chup mot khung, luu anh + metadata. Co subcommand `focus`. |
 | `focus.py` | Che do canh net truc tiep (goi tu `capture.py focus`). |
+| `gui.py` | GUI Tkinter don gian: theo doi trang thai, chinh thong so, an chup, xem preview - lop mong tren `capture.py`, khong viet lai logic. |
 | `config.yaml` | Cau hinh mau, **da dien gia tri that** xac minh tren camera serial `00F67674995`, firmware `V3.1.1 200717`. |
 | `node_map_full.json` | Dump verbatim toan bo 2997 node cua camera that (nguon tra cuu ten node). |
-| `camera_report.md` | Tom tat node quan trong + doi chung datasheet. |
-| `capture_bindings_and_issues.md` | Ghi chu ky thuat: ten node dung de set, van de BlackLevel, binding khong on-sensor. |
+| `reference/` | Tai lieu tham khao: `camera_report.md` (tom tat node quan trong + doi chung datasheet), `capture_bindings_and_issues.md` (ghi chu ky thuat: ten node dung de set, van de BlackLevel, binding khong on-sensor), `poc_camera_bringup_spec.md` (dac ta goc), `claude_code_task_dump_nodemap.md` (nhiem vu dump node map ban dau). |
 
 ## 1. Cai dat
 
@@ -46,7 +46,7 @@ pip install -r requirements.txt
 **CHUA xac minh duong dan `.cti` tren Linux** (du an nay phat trien tren Windows). Sau khi
 cai MVS SDK cho Linux, dinh vi `MvProducerGEV.cti` that (thuong o `/opt/MVS/lib/64/`) va dien
 vao `config.yaml` -> `gentl.cti_linux`. Tren Linux, dat MTU cua NIC >= packet size (vd 9000)
-de tranh mat goi o full-res - xem `capture_bindings_and_issues.md` muc 5.
+de tranh mat goi o full-res - xem `reference/capture_bindings_and_issues.md` muc 5.
 
 ### 1.4 Kiem tra ket noi
 
@@ -85,7 +85,38 @@ Vi du metadata that (da chup Mono12 full-res tren camera nay):
 }
 ```
 
-## 3. Canh net truc tiep
+### File log
+
+Moi lan chay `capture.py capture` hoac `capture.py focus`, ngoai console (muc INFO, gon)
+con ghi mot **file log rieng cho lan chay do** vao `logs/<command>_<timestamp>.log`
+(muc DEBUG, co timestamp + ten module). File nay ghi ca cac dong console khong in ra, vi du
+so lan `fetch_buffer_retrying()` phai thu lai do loi UnicodeDecodeError cua
+`MvProducerGEV.cti` (muc 5.1) - huu ich khi debug loi khong on dinh sau nay ma khong can bat
+lai tay. Tat file log bang `--log-dir ""`, hoac doi thu muc bang `--log-dir DIR` hoac
+`logging.dir` trong config.yaml. `logs/` khong duoc dua vao git (xem `.gitignore`).
+
+## 3. GUI don gian
+
+```bash
+python gui.py --config config.yaml
+```
+
+Cua so gom: trang thai ket noi + model/serial/firmware, cac o chinh pixel format/exposure/
+gain/binning/black level/thu muc luu, nut **Chup anh**, khung preview anh vua chup (downscale
+8x, hien qua PNG), va panel log. Bam Chup se chay dung trinh tu nhu `capture.py capture`:
+enforce_linear -> apply_adjustable -> single_capture -> save_image - **dung lai chinh cac ham
+da test trong `capture.py`, khong co logic rieng**. Chup chay trong thread nen de khong treo
+cua so (anh full-res Mono12 mat khoang 1-2 giay qua GigE).
+
+**Da test bang cach lai chuong trinh qua code** (ket noi that, bam nut Chup that, chup thanh
+cong tren camera that, preview PNG tao thanh cong) nhung **chua the xac nhan bang mat** giao
+dien hien thi dung nhu mong doi (khong co man hinh de kiem tra truc quan trong qua trinh phat
+trien) - ban nen tu mo thu truoc khi dung that.
+
+Tren Linux, tkinter co the can cai rieng: `sudo apt install python3-tk` (khong co trong
+`requirements.txt` vi la module chuan cua Python, khong phai goi pip).
+
+## 4. Canh net truc tiep
 
 ```bash
 python capture.py focus --config config.yaml            # mode=auto: tu chon gui/headless
@@ -102,9 +133,9 @@ of Laplacian.
   qua trinh phat trien nay (khong co man hinh de kiem tra truc quan); code da chay het
   nhanh logic (khong loi) nhung ban nen tu kiem tra cua so hien thi dung truoc khi dung that.
 
-## 4. Van de da biet va cach xu ly
+## 5. Van de da biet va cach xu ly
 
-### 4.1 `MvProducerGEV.cti` (V3.1.1 200717) tra ve du lieu khong phai UTF-8 hop le
+### 5.1 `MvProducerGEV.cti` (V3.1.1 200717) tra ve du lieu khong phai UTF-8 hop le
 
 Xac minh truc tiep tren camera that (khong doan). Ba diem crash rieng biet trong
 `harvesters`/`genicam`, deu da xu ly trong `gev_camera.py`:
@@ -123,14 +154,14 @@ Xac minh truc tiep tren camera that (khong doan). Ba diem crash rieng biet trong
 `camera_info.py` chi can patch (1) vi khong dung `ImageAcquirer`. `capture.py`/`focus.py`
 can ca ba.
 
-### 4.2 Binning khong phai on-sensor
+### 5.2 Binning khong phai on-sensor
 
 `BinningSelector` chi co entry `Region0` kha dung (`Sensor` co access `NI`). Nghia la
 `BinningHorizontal2`/`BinningVertical2` la **gop pixel digital sau ADC**, khong phai gop
 dien tich tren cam bien - khong cai thien SNR nhu binning that. `capture.py` van cho phep
 bat (ghi log canh bao ro) nhung khong nen trong cay vao no de tang SNR vat moc xa.
 
-### 4.3 BlackLevel = 200 (pedestal)
+### 5.3 BlackLevel = 200 (pedestal)
 
 Mac dinh camera cong offset 200 DN (thang 0-4095) vao moi pixel (`BlackLevelEnable=True`).
 Offset nay **khong triet tieu trong do tuong phan Weber**. `capture.py` mac dinh
@@ -138,14 +169,14 @@ Offset nay **khong triet tieu trong do tuong phan Weber**. `capture.py` mac dinh
 calibration sau (dark frame) phai tru gia tri nay. Doi `mode: set_zero` trong config neu
 muon dat ve 0 (chua kiem chung anh huong toi tuyen tinh o che do nay).
 
-### 4.4 Noise reduction
+### 5.4 Noise reduction
 
 Cac node lien quan (`DigitalNoiseReductionMode`, `NoiseReduction`, `TZDenoiseOpen`, ...) deu
 co access `NI`/`NA` tren firmware nay - khong set duoc va khong co gi de tat. `capture.py`
 coi day la **binh thuong, khong phai loi** (ISP khong co pipeline noise reduction hoat dong
 de lo).
 
-## 5. Doi chung datasheet (tom tat, chi tiet o `camera_report.md`)
+## 6. Doi chung datasheet (tom tat, chi tiet o `reference/camera_report.md`)
 
 | Thong so | Datasheet | Do tu node map | Ket luan |
 |---|---|---|---|
@@ -156,11 +187,12 @@ de lo).
 | Model | MV-CE200-10GM | MV-CE200-10GM | khop |
 | Nguon PoE/12VDC, 0~50C | co | khong co node de doc lai | xac minh bang datasheet/do thuc te |
 
-## 6. Chua lam trong PoC nay
+## 7. Chua lam trong PoC nay
 
 - Giai nen `Mono10Packed`/`Mono12Packed` (dung ban unpacked de thay the).
 - Xac minh `.cti` tren Linux (chi test tren Windows).
-- Xac nhan bang mat che do `focus --mode gui`.
+- Xac nhan bang mat che do `focus --mode gui` va giao dien `gui.py` (da test logic bang cach
+  lai chuong trinh qua code, chua xac nhan hien thi truc quan dung nhu mong doi).
 - Dark frame / flat frame calibration, kiem chung tuyen tinh bang chuoi exposure, trigger
   phan cung, truyen du lieu LTE, tinh MOR - deu ngoai pham vi PoC nay (xem
-  `poc_camera_bringup_spec.md` muc 2).
+  `reference/poc_camera_bringup_spec.md` muc 2).

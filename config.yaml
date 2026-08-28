@@ -1,5 +1,5 @@
 # Camera: Hikrobot MV-CE200-10GM, serial 00F67674995, firmware V3.1.1 200717
-# Ten node va gia tri da xac minh tu node map that (camera_report.md, 2026-08-28).
+# Ten node va gia tri da xac minh tu node map that (reference/camera_report.md, 2026-08-28).
 
 camera:
   serial: "00F67674995"    # de trong ("") -> lay thiet bi dau tien do duoc
@@ -31,7 +31,7 @@ enforce_linear:
   # trong firmware nay. Khong set duoc va nhieu kha nang khong hoat dong.
   # Ghi log "khong co node NR kha dung de tat", KHONG coi la loi.
 
-# Black level: PEDESTAL dang bat. Day la diem then chot, xem capture_bindings_and_issues.md muc 2.
+# Black level: PEDESTAL dang bat. Day la diem then chot, xem reference/capture_bindings_and_issues.md muc 2.
 black_level:
   # node BlackLevel (Integer) = 200 tren [0,4095]; BlackLevelEnable (Boolean) = True.
   # Offset nay KHONG triet tieu trong do tuong phan Weber. Bat buoc ghi metadata + tru dark frame sau.
