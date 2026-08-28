@@ -1,17 +1,18 @@
 """
-capture.py - chuong trinh chinh: ket noi camera GigE (Hikrobot MV-CE200-10GM),
-ep + xac minh cac thong so linearity-critical, chup mot khung theo lenh, luu
-anh giu nguyen bit depth + metadata. Toan bo tham so duoc dieu khien qua CLI
-argparse - khong con file config ngoai.
+capture.py - ket noi camera GigE (Hikrobot MV-CE200-10GM), khoa cung 14 node
+anh huong tuyen tinh, ap config theo site (exposure/gain/mang), chup mot
+khung theo lenh, luu anh giu nguyen bit depth + metadata. Toan bo tham so
+qua CLI argparse - khong con file config ngoai.
 
 Su dung:
-    python capture.py [--ip IP | --serial SERIAL] [--pixel-format Mono8|Mono10|Mono12]
-                       [--exposure-us US] [--gain-db DB] [--outdir DIR] ...
+    python capture.py [--ip IP | --serial SERIAL] [--exposure-us US]
+                       [--gain-db DB] [--outdir DIR] ...
     python capture.py --help    # xem toan bo flag
 
 Toan bo ten node GenICam dung o day da xac minh tren camera that qua
 camera_info.py (xem node_map_full.json, reference/camera_report.md,
-reference/capture_bindings_and_issues.md). Khong doan/hard-code khi chua tra cuu.
+reference/hikrobot_phanloai_tuyentinh.md, reference/capture_bindings_and_issues.md).
+Khong doan/hard-code khi chua tra cuu.
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ import argparse
 import json
 import logging
 import signal
+import socket
+import struct
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,103 +66,39 @@ def add_file_logging(log_dir: str, command: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Config: gia tri mac dinh an toan, dung lam schema noi bo + fallback khi
-# mot flag CLI khong duoc chi dinh.
+# SECTION 1 - CONFIG BAT BIEN (LINEARITY LOCKED)
+#
+# 14 node duoi day khong bao gio doi, khong co CLI flag. Sai mot gia tri la
+# hong vat ly am tham: R^2 van cao, MOR do duoc lech he thong ma khong co
+# dau hieu loi ro rang. Nhom theo dung muc Appendix A trong
+# reference/hikrobot_phanloai_tuyentinh.md de doi chieu nguoc lai tai lieu
+# de dang khi tai lieu cap nhat.
 # ---------------------------------------------------------------------------
-DEFAULTS: dict[str, Any] = {
-    "camera": {"serial": None, "ip": None},
-    "gentl": {"cti": None},
-    "acquisition": {
-        "pixel_format": "Mono8",   # an toan nhat, khong can giai nen, luon duoc ho tro
-        "exposure_us": 10000.0,
-        "gain_db": 0.0,
+LINEARITY_LOCKED: dict[str, Any] = {
+    "image_format": {  # A.2 Image Format Control
+        "pixel_format": "Mono12",
+        "binning_h": "BinningHorizontal1",
+        "binning_v": "BinningVertical1",
+        "test_pattern": "Off",
     },
-    "enforce_linear": {
-        "gamma_enable": False,
-        "auto_exposure": "Off",
-        "auto_gain": "Off",
-        "lut_enable": False,
+    "acquisition": {  # A.3 Acquisition Control
+        "exposure_auto": "Off",
         "exposure_mode": "Timed",
+        "hdr_enable": False,
     },
-    "black_level": {"mode": "keep_and_record", "value": None},
-    "roi": {"width": None, "height": None, "x_offset": 0, "y_offset": 0},
-    "output": {
-        "dir": "./captures",
-        "image_format": "tiff16",
-        "also_save_npy": False,
-        "write_metadata_json": True,
+    "analog": {  # A.4 Analog Control (Gain khong o day - la config theo site, xem SECTION 2)
+        "gain_auto": "Off",
+        "digital_shift_enable": False,
+        "black_level_enable": True,
+        "black_level": 200,  # khoa dung gia tri de dark frame hien co con hop le; doi so phai chup lai dark frame
+        "gamma_enable": False,
+        "sharpness_enable": False,
     },
-    "network": {"packet_size": None},
-    "logging": {"dir": DEFAULT_LOG_DIR},
+    "lut": {  # A.7 LUT Control
+        "lut_enable": False,
+    },
 }
 
-
-def config_from_args(args: argparse.Namespace) -> dict:
-    """Dung dict config (cung hinh dang DEFAULTS) truc tiep tu cac flag CLI
-    da parse - thay cho viec doc config.yaml."""
-    return {
-        "camera": {"serial": args.serial, "ip": args.ip},
-        "gentl": {"cti": args.cti},
-        "acquisition": {
-            "pixel_format": args.pixel_format,
-            "exposure_us": args.exposure_us,
-            "gain_db": args.gain_db,
-        },
-        "enforce_linear": {
-            "gamma_enable": args.gamma_enable,
-            "auto_exposure": args.auto_exposure,
-            "auto_gain": args.auto_gain,
-            "lut_enable": args.lut_enable,
-            "exposure_mode": args.exposure_mode,
-        },
-        "black_level": {"mode": args.black_level_mode, "value": args.black_level_value},
-        "roi": {
-            "width": args.roi_width,
-            "height": args.roi_height,
-            "x_offset": args.roi_x_offset,
-            "y_offset": args.roi_y_offset,
-        },
-        "output": {
-            "dir": args.outdir,
-            "image_format": args.image_format,
-            "also_save_npy": args.save_npy,
-            "write_metadata_json": args.metadata,
-        },
-        "network": {"packet_size": args.packet_size},
-        "logging": {"dir": args.log_dir},
-    }
-
-
-def _warn_unwired_fields(config: dict) -> None:
-    """3 field nay hien dien trong CLI/schema nhung chua co code nao ap dung
-    len camera/file that su. Canh bao ro de nguoi dung khong tuong nham la
-    da co hieu luc."""
-    if config["output"]["image_format"] != DEFAULTS["output"]["image_format"]:
-        log.warning(
-            "--image-format=%s: CHUA duoc wired-up, anh van luon ghi .tiff (xem save_image()).",
-            config["output"]["image_format"])
-    if config["network"]["packet_size"] is not None:
-        log.warning(
-            "--packet-size=%s: CHUA duoc wired-up, khong co code nao set GevSCPSPacketSize len camera.",
-            config["network"]["packet_size"])
-    if config["black_level"]["value"] is not None and config["black_level"]["mode"] != "set_zero":
-        log.warning(
-            "--black-level-value=%s: CHUA duoc wired-up khi black-level-mode=%s "
-            "(chi mode=set_zero moi ghi gia tri, va luon ghi 0 chu khong doc field nay).",
-            config["black_level"]["value"], config["black_level"]["mode"])
-
-
-def cti_path_for_platform(config: dict) -> str:
-    explicit = config["gentl"].get("cti")
-    path, source = gc.find_cti(explicit)
-    if explicit and path == explicit:
-        source = "--cti"
-    return path
-
-
-# ---------------------------------------------------------------------------
-# Section 5.3: ep + xac minh cac thong so linearity-critical
-# ---------------------------------------------------------------------------
 NOISE_REDUCTION_CANDIDATES = [
     "NoiseReductionEnable", "DigitalNoiseReductionMode", "NoiseReduction", "TZDenoiseOpen",
 ]
@@ -171,7 +110,8 @@ def _enforce_noise_reduction(node_map) -> dict:
     KHONG duoc coi la loi (khong the "khong tat duoc" mot thu khong the
     bat len duoc): ISP khong co pipeline noise reduction hoat dong. Neu
     mot camera/firmware khac co node nay o RW, code se tu dong tat va
-    xac minh nhu cac thong so linearity-critical khac."""
+    xac minh nhu cac node linearity khac. Khong thuoc mot muc A.x nao
+    trong tai lieu phan loai - day la phong ngua rieng cua capture.py."""
     name, node = gc.find_first_node(node_map, NOISE_REDUCTION_CANDIDATES)
     if node is None:
         log.warning("Noise reduction: khong tim thay node nao trong %s", NOISE_REDUCTION_CANDIDATES)
@@ -197,108 +137,229 @@ def _enforce_noise_reduction(node_map) -> dict:
         raise gc.ParameterError(f"Noise reduction ({name}): {e}") from e
 
 
-def enforce_linear(node_map, config: dict) -> dict:
-    cfg = config["enforce_linear"]
-    results: dict[str, Any] = {}
-
-    results["gamma_enable"] = gc.set_bool_and_verify(
-        node_map, ["GammaEnable"], bool(cfg["gamma_enable"]), "Gamma")
-    results["auto_exposure"] = gc.set_enum_and_verify(
-        node_map, ["ExposureAuto"], str(cfg["auto_exposure"]), "Auto exposure")
-    results["auto_gain"] = gc.set_enum_and_verify(
-        node_map, ["GainAuto"], str(cfg["auto_gain"]), "Auto gain")
-    results["lut_enable"] = gc.set_bool_and_verify(
-        node_map, ["LUTEnable"], bool(cfg["lut_enable"]), "LUT")
-    results["exposure_mode"] = gc.set_enum_and_verify(
-        node_map, ["ExposureMode"], str(cfg["exposure_mode"]), "Exposure mode")
-
-    results["noise_reduction"] = _enforce_noise_reduction(node_map)
-
-    log.info("AWB: bo qua - cam bien mono, khong ap dung.")
-    results["awb"] = {"note": "bo qua - cam bien mono, AWB khong ap dung"}
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Section 5.4: thong so chinh duoc
-# ---------------------------------------------------------------------------
-def apply_adjustable(node_map, config: dict) -> dict:
-    acq = config["acquisition"]
-    results: dict[str, Any] = {}
-
-    results["pixel_format"] = gc.set_enum_and_verify(
-        node_map, ["PixelFormat"], str(acq["pixel_format"]), "Pixel format")
-
-    # ExposureAuto phai da Off (enforce_linear chay truoc ham nay).
-    results["exposure_us"] = gc.set_float_and_verify(
-        node_map, ["ExposureTime", "ExposureTimeAbs"], float(acq["exposure_us"]), "Exposure time")
-
-    # GainAuto phai da Off.
-    results["gain_db"] = gc.set_float_and_verify(
-        node_map, ["Gain"], float(acq["gain_db"]), "Gain")
-
-    # Binning khong dung: luon ep ve 1x1 (pixel goc, khong gop pixel) va xac
-    # minh, khong cho chinh qua CLI - xem reference/capture_bindings_and_issues.md muc 3.
-    gc.set_enum_and_verify(node_map, ["BinningHorizontal"], "BinningHorizontal1", "Binning ngang")
-    gc.set_enum_and_verify(node_map, ["BinningVertical"], "BinningVertical1", "Binning doc")
-
-    results["black_level"] = _apply_black_level(node_map, config["black_level"])
-
-    results["roi"] = _apply_roi(node_map, config["roi"])
-
-    return results
-
-
-def _apply_black_level(node_map, cfg: dict) -> dict:
-    mode = cfg.get("mode", "keep_and_record")
-    if mode == "set_zero":
-        value_result = gc.set_int_and_verify(node_map, ["BlackLevel"], 0, "Black level")
-    elif mode == "keep_and_record":
-        name, node = gc.find_first_node(node_map, ["BlackLevel"])
-        if node is None:
-            raise gc.ParameterError("Black level: khong tim thay node BlackLevel")
-        value_result = {"node": name, "value": node.value, "access": gc.access_mode_of(node)}
-        log.info("Black level (%s) = %s [giu nguyen, mode=keep_and_record]", name, node.value)
-    else:
-        raise gc.ParameterError(f"black_level.mode khong hop le: {mode!r} (chi keep_and_record | set_zero)")
-
-    enable_name, enable_val = gc.read_value(node_map, ["BlackLevelEnable"], "Black level enable")
-    log.warning(
-        "Black level = %s (BlackLevelEnable=%s): day la pedestal CONG THEM vao moi pixel, KHONG "
-        "triet tieu trong tuong phan Weber. Da ghi vao metadata; buoc calibration sau phai tru "
-        "dark frame. Xem reference/capture_bindings_and_issues.md muc 2.",
-        value_result["value"], enable_val)
-
+def _enforce_image_format(node_map, cfg: dict) -> dict:  # A.2
     return {
-        "mode": mode,
-        "value": value_result["value"],
-        "enable_node": enable_name,
-        "enable": enable_val,
+        "pixel_format": gc.set_enum_and_verify(
+            node_map, ["PixelFormat"], cfg["pixel_format"], "Pixel format"),
+        "binning_h": gc.set_enum_and_verify(
+            node_map, ["BinningHorizontal"], cfg["binning_h"], "Binning ngang"),
+        "binning_v": gc.set_enum_and_verify(
+            node_map, ["BinningVertical"], cfg["binning_v"], "Binning doc"),
+        "test_pattern": gc.set_enum_and_verify(
+            node_map, ["TestPattern"], cfg["test_pattern"], "Test pattern"),
     }
 
 
-def _apply_roi(node_map, cfg: dict) -> dict:
-    width_max = node_map.WidthMax.value
-    height_max = node_map.HeightMax.value
-    width = cfg.get("width") or width_max
-    height = cfg.get("height") or height_max
-    x_offset = cfg.get("x_offset", 0) or 0
-    y_offset = cfg.get("y_offset", 0) or 0
+def _enforce_acquisition(node_map, cfg: dict) -> dict:  # A.3
+    return {
+        "exposure_auto": gc.set_enum_and_verify(
+            node_map, ["ExposureAuto"], cfg["exposure_auto"], "Auto exposure"),
+        "exposure_mode": gc.set_enum_and_verify(
+            node_map, ["ExposureMode"], cfg["exposure_mode"], "Exposure mode"),
+        "hdr_enable": gc.set_bool_and_verify(
+            node_map, ["HDREnable"], cfg["hdr_enable"], "HDR"),
+    }
 
-    w_result = gc.set_int_and_verify(node_map, ["Width"], width, "ROI width")
-    h_result = gc.set_int_and_verify(node_map, ["Height"], height, "ROI height")
-    if node_map.has_node("OffsetX"):
-        gc.set_int_and_verify(node_map, ["OffsetX"], x_offset, "ROI offset X")
-    if node_map.has_node("OffsetY"):
-        gc.set_int_and_verify(node_map, ["OffsetY"], y_offset, "ROI offset Y")
 
-    return {"width": w_result["value"], "height": h_result["value"],
-            "x_offset": x_offset, "y_offset": y_offset}
+def _enforce_analog(node_map, cfg: dict) -> dict:  # A.4
+    results = {
+        "gain_auto": gc.set_enum_and_verify(node_map, ["GainAuto"], cfg["gain_auto"], "Auto gain"),
+        "digital_shift_enable": gc.set_bool_and_verify(
+            node_map, ["DigitalShiftEnable"], cfg["digital_shift_enable"], "Digital shift"),
+        "black_level_enable": gc.set_bool_and_verify(
+            node_map, ["BlackLevelEnable"], cfg["black_level_enable"], "Black level enable"),
+        "black_level": gc.set_int_and_verify(node_map, ["BlackLevel"], cfg["black_level"], "Black level"),
+        "gamma_enable": gc.set_bool_and_verify(node_map, ["GammaEnable"], cfg["gamma_enable"], "Gamma"),
+        "sharpness_enable": gc.set_bool_and_verify(
+            node_map, ["SharpnessEnable"], cfg["sharpness_enable"], "Sharpness"),
+    }
+    log.warning(
+        "Black level = %s (Enable=%s): pedestal cong them vao moi pixel, khong triet tieu qua ty le "
+        "Weber. Khoa dung gia tri nay de dark frame hien co con hop le - doi gia tri phai chup lai dark frame.",
+        results["black_level"]["value"], results["black_level_enable"]["value"])
+    return results
+
+
+def _enforce_lut(node_map, cfg: dict) -> dict:  # A.7
+    return {"lut_enable": gc.set_bool_and_verify(node_map, ["LUTEnable"], cfg["lut_enable"], "LUT")}
+
+
+def enforce_linearity_locked(node_map) -> dict:
+    """Khoa + xac minh 14 node LINEARITY_LOCKED. Loi bat ky node nao raise
+    gc.ParameterError - goi noi dung (cmd_capture) phai dung lai, khong chup."""
+    return {
+        "image_format": _enforce_image_format(node_map, LINEARITY_LOCKED["image_format"]),
+        "acquisition": _enforce_acquisition(node_map, LINEARITY_LOCKED["acquisition"]),
+        "analog": _enforce_analog(node_map, LINEARITY_LOCKED["analog"]),
+        "lut": _enforce_lut(node_map, LINEARITY_LOCKED["lut"]),
+        "noise_reduction": _enforce_noise_reduction(node_map),
+    }
 
 
 # ---------------------------------------------------------------------------
-# Section 5.5: chup don
+# SECTION 2 - CONFIG THEO SITE
+#
+# Dat mot lan luc lap dat, co dinh sau do. Khong anh huong tuyen tinh (mang
+# thuoc A.16 Transport Layer Control trong tai lieu phan loai - noi ro
+# khong anh huong tuyen tinh) nhung van "co dinh sau lap" nen o day chu
+# khong phai logic dieu khien.
+# ---------------------------------------------------------------------------
+def _apply_optional_int(node_map, candidates, desired, label) -> dict:
+    if desired is None:
+        name, value = gc.read_value(node_map, candidates, label)
+        return {"node": name, "value": value, "set_by_user": False}
+    result = gc.set_int_and_verify(node_map, candidates, int(desired), label)
+    result["set_by_user"] = True
+    return result
+
+
+def _apply_optional_bool(node_map, candidates, desired, label) -> dict:
+    if desired is None:
+        name, value = gc.read_value(node_map, candidates, label)
+        return {"node": name, "value": value, "set_by_user": False}
+    result = gc.set_bool_and_verify(node_map, candidates, bool(desired), label)
+    result["set_by_user"] = True
+    return result
+
+
+def _apply_optional_ip(node_map, candidates, desired_dotted, label) -> dict:
+    """Node GEV luu IP dang Integer 32-bit; desired_dotted la chuoi
+    'a.b.c.d' hoac None (khong dung, chi doc + ghi nhan)."""
+    if desired_dotted is None:
+        name, value = gc.read_value(node_map, candidates, label)
+        return {"node": name, "value": gc.ip_int_to_dotted(value), "set_by_user": False}
+    try:
+        desired_int = struct.unpack("!I", socket.inet_aton(desired_dotted))[0]
+    except OSError as e:
+        raise gc.ParameterError(f"{label}: '{desired_dotted}' khong phai dia chi IPv4 hop le ({e})") from e
+    result = gc.set_int_and_verify(node_map, candidates, desired_int, label)
+    result["value"] = gc.ip_int_to_dotted(result["value"])
+    result["set_by_user"] = True
+    return result
+
+
+def _apply_site_network(node_map, net: dict) -> dict:
+    results = {
+        "packet_size": _apply_optional_int(
+            node_map, ["GevSCPSPacketSize", "DeviceStreamChannelPacketSize"], net["packet_size"], "Packet size"),
+        "scpd": _apply_optional_int(node_map, ["GevSCPD"], net["scpd"], "SCPD (inter-packet delay)"),
+        "persistent_ip": _apply_optional_ip(
+            node_map, ["GevPersistentIPAddress"], net["persistent_ip"], "Persistent IP"),
+        "persistent_subnet": _apply_optional_ip(
+            node_map, ["GevPersistentSubnetMask"], net["persistent_subnet"], "Persistent subnet mask"),
+        "persistent_gateway": _apply_optional_ip(
+            node_map, ["GevPersistentDefaultGateway"], net["persistent_gateway"], "Persistent gateway"),
+        "dhcp": _apply_optional_bool(node_map, ["GevCurrentIPConfigurationDHCP"], net["dhcp"], "DHCP"),
+        "persistent_ip_mode": _apply_optional_bool(
+            node_map, ["GevCurrentIPConfigurationPersistentIP"], net["persistent_ip_mode"], "Persistent IP mode"),
+        "do_not_fragment": _apply_optional_bool(
+            node_map, ["GevSCPSDoNotFragment"], net["do_not_fragment"], "SCPS Do Not Fragment"),
+        "heartbeat_timeout_ms": _apply_optional_int(
+            node_map, ["GevHeartbeatTimeout"], net["heartbeat_timeout_ms"], "Heartbeat timeout"),
+    }
+    # GevPersistent*/GevCurrentIPConfiguration* chi co hieu luc sau khi camera
+    # khoi dong lai (GigE Vision spec) - khong lam rot ket noi phien hien tai.
+    reboot_fields = ("persistent_ip", "persistent_subnet", "persistent_gateway", "dhcp", "persistent_ip_mode")
+    if any(results[f]["set_by_user"] for f in reboot_fields):
+        log.warning(
+            "Da doi cau hinh IP persistent/DHCP - chi co hieu luc sau khi camera khoi dong lai.")
+    return results
+
+
+def apply_site_config(node_map, config: dict) -> dict:
+    site = config["site"]
+    return {
+        "exposure_us": gc.set_float_and_verify(
+            node_map, ["ExposureTime", "ExposureTimeAbs"], float(site["exposure_us"]), "Exposure time"),
+        "gain_db": gc.set_float_and_verify(node_map, ["Gain"], float(site["gain_db"]), "Gain"),
+        "network": _apply_site_network(node_map, site["network"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Config: gia tri mac dinh an toan, dung lam schema noi bo + fallback khi
+# mot flag CLI khong duoc chi dinh.
+# ---------------------------------------------------------------------------
+DEFAULTS: dict[str, Any] = {
+    "camera": {"serial": None, "ip": None},
+    "gentl": {"cti": None},
+    "site": {
+        "exposure_us": 5000.0,
+        "gain_db": 0.0,
+        "network": {
+            "packet_size": None,
+            "scpd": None,
+            "persistent_ip": None,
+            "persistent_subnet": None,
+            "persistent_gateway": None,
+            "dhcp": None,
+            "persistent_ip_mode": None,
+            "do_not_fragment": None,
+            "heartbeat_timeout_ms": None,
+        },
+    },
+    "output": {
+        "dir": "./captures",
+        "image_format": "tiff16",
+        "also_save_npy": False,
+        "write_metadata_json": True,
+    },
+    "logging": {"dir": DEFAULT_LOG_DIR},
+}
+
+
+def config_from_args(args: argparse.Namespace) -> dict:
+    """Dung dict config (cung hinh dang DEFAULTS) truc tiep tu cac flag CLI
+    da parse - thay cho viec doc config.yaml."""
+    return {
+        "camera": {"serial": args.serial, "ip": args.ip},
+        "gentl": {"cti": args.cti},
+        "site": {
+            "exposure_us": args.exposure_us,
+            "gain_db": args.gain_db,
+            "network": {
+                "packet_size": args.packet_size,
+                "scpd": args.scpd,
+                "persistent_ip": args.persistent_ip,
+                "persistent_subnet": args.persistent_subnet,
+                "persistent_gateway": args.persistent_gateway,
+                "dhcp": args.dhcp,
+                "persistent_ip_mode": args.persistent_ip_mode,
+                "do_not_fragment": args.do_not_fragment,
+                "heartbeat_timeout_ms": args.heartbeat_timeout_ms,
+            },
+        },
+        "output": {
+            "dir": args.outdir,
+            "image_format": args.image_format,
+            "also_save_npy": args.save_npy,
+            "write_metadata_json": args.metadata,
+        },
+        "logging": {"dir": args.log_dir},
+    }
+
+
+def _warn_unwired_fields(config: dict) -> None:
+    """image_format hien dien trong CLI/schema nhung chua co code nao ap
+    dung len file that su. Canh bao ro de nguoi dung khong tuong nham la
+    da co hieu luc."""
+    if config["output"]["image_format"] != DEFAULTS["output"]["image_format"]:
+        log.warning(
+            "--image-format=%s: CHUA duoc wired-up, anh van luon ghi .tiff (xem save_image()).",
+            config["output"]["image_format"])
+
+
+def cti_path_for_platform(config: dict) -> str:
+    explicit = config["gentl"].get("cti")
+    path, source = gc.find_cti(explicit)
+    if explicit and path == explicit:
+        source = "--cti"
+    return path
+
+
+# ---------------------------------------------------------------------------
+# SECTION 3 - LOGIC DIEU KHIEN: chup, luu, doc thiet bi.
+# Khong dinh nghia hang so linearity nao o day - chi goi SECTION 1/2.
 # ---------------------------------------------------------------------------
 def single_capture(ia, node_map, config: dict) -> tuple[np.ndarray, dict]:
     gc.set_enum_and_verify(node_map, ["AcquisitionMode"], "SingleFrame", "Acquisition mode")
@@ -346,9 +407,6 @@ def single_capture(ia, node_map, config: dict) -> tuple[np.ndarray, dict]:
     return arr, info
 
 
-# ---------------------------------------------------------------------------
-# Section 5.7: luu anh + metadata
-# ---------------------------------------------------------------------------
 UNPACKED_DTYPE = {"Mono8": np.uint8, "Mono10": np.uint16, "Mono12": np.uint16}
 PACKED_FORMATS = {"Mono10Packed", "Mono12Packed", "Mono10p", "Mono12p"}
 
@@ -392,23 +450,13 @@ def save_image(arr: np.ndarray, info: dict, out_dir: Path, base_name: str, confi
     }
 
 
-def build_metadata(device_info: dict, linear_results: dict, adjustable_results: dict) -> dict:
-    black_level = adjustable_results["black_level"]
+def build_metadata(device_info: dict, locked_results: dict, site_results: dict) -> dict:
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "device_serial": device_info["serial"],
         "device_firmware": device_info["firmware"],
-        "pixel_format": adjustable_results["pixel_format"]["value"],
-        "exposure_us": adjustable_results["exposure_us"]["value"],
-        "gain_db": adjustable_results["gain_db"]["value"],
-        "black_level_mode": black_level["mode"],
-        "black_level": black_level["value"],
-        "black_level_enable": black_level["enable"],
-        "gamma_enable": linear_results["gamma_enable"]["value"],
-        "auto_exposure": linear_results["auto_exposure"]["value"],
-        "auto_gain": linear_results["auto_gain"]["value"],
-        "lut_enable": linear_results["lut_enable"]["value"],
-        "exposure_mode": linear_results["exposure_mode"]["value"],
+        "linearity_locked": locked_results,  # A.2/A.3/A.4/A.7 + noise_reduction, xem LINEARITY_LOCKED
+        "site": site_results,  # exposure_us, gain_db, network (A.16)
     }
 
 
@@ -425,9 +473,6 @@ def read_device_info(node_map) -> dict:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Chup mot khung
-# ---------------------------------------------------------------------------
 def cmd_capture(args: argparse.Namespace, config: dict) -> int:
     cti_path = cti_path_for_platform(config)
     log.info("Dung .cti: %s", cti_path)
@@ -441,19 +486,19 @@ def cmd_capture(args: argparse.Namespace, config: dict) -> int:
         log.info("Da ket noi: model=%s serial=%s firmware=%s",
                  device_info["model"], device_info["serial"], device_info["firmware"])
 
-        log.info("--- Ep va xac minh thong so linearity-critical ---")
+        log.info("--- Khoa + xac minh 14 node linearity ---")
         try:
-            linear_results = enforce_linear(node_map, config)
+            locked_results = enforce_linearity_locked(node_map)
         except gc.ParameterError as e:
-            log.error("KHONG the ep thong so linearity-critical ve trang thai an toan: %s", e)
+            log.error("KHONG the khoa cung tham so tuyen tinh: %s", e)
             log.error("DUNG. Khong chup anh (anh voi ISP con bat la anh vo dung cho du an nay).")
             return 2
 
-        log.info("--- Ap dung thong so chinh duoc ---")
+        log.info("--- Ap dung config theo site ---")
         try:
-            adjustable_results = apply_adjustable(node_map, config)
+            site_results = apply_site_config(node_map, config)
         except gc.ParameterError as e:
-            log.error("Khong ap dung duoc thong so: %s", e)
+            log.error("Khong ap dung duoc config site: %s", e)
             return 2
 
         log.info("--- Chup mot khung ---")
@@ -469,7 +514,7 @@ def cmd_capture(args: argparse.Namespace, config: dict) -> int:
                  save_info["min"], save_info["max"])
 
         if config["output"]["write_metadata_json"]:
-            meta = build_metadata(device_info, linear_results, adjustable_results)
+            meta = build_metadata(device_info, locked_results, site_results)
             meta_path = out_dir / f"{base_name}.json"
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2, default=str)
@@ -486,40 +531,33 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
     cam = parser.add_argument_group("Camera")
-    cam.add_argument("--ip", default=DEFAULTS["camera"]["ip"], help="IP camera. Bo trong de dung serial hoac thiet bi dau tien do duoc.")
+    cam.add_argument("--ip", default=DEFAULTS["camera"]["ip"],
+                      help="IP camera. Bo trong de dung serial hoac thiet bi dau tien do duoc.")
     cam.add_argument("--serial", default=DEFAULTS["camera"]["serial"], help="Serial camera.")
     cam.add_argument("--cti", default=DEFAULTS["gentl"]["cti"], help="Duong dan .cti tuong minh. Bo trong de tu do tim.")
 
-    acq = parser.add_argument_group("Acquisition")
-    acq.add_argument("--pixel-format", choices=["Mono8", "Mono10", "Mono12"],
-                      default=DEFAULTS["acquisition"]["pixel_format"])
-    acq.add_argument("--exposure-us", type=float, default=DEFAULTS["acquisition"]["exposure_us"])
-    acq.add_argument("--gain-db", type=float, default=DEFAULTS["acquisition"]["gain_db"])
-
-    lin = parser.add_argument_group("Linearity-critical (enforce_linear)")
-    lin.add_argument("--gamma-enable", dest="gamma_enable", action="store_true",
-                      default=DEFAULTS["enforce_linear"]["gamma_enable"])
-    lin.add_argument("--no-gamma-enable", dest="gamma_enable", action="store_false")
-    lin.add_argument("--auto-exposure", choices=["Off", "Once", "Continuous"],
-                      default=DEFAULTS["enforce_linear"]["auto_exposure"])
-    lin.add_argument("--auto-gain", choices=["Off", "Once", "Continuous"],
-                      default=DEFAULTS["enforce_linear"]["auto_gain"])
-    lin.add_argument("--lut-enable", dest="lut_enable", action="store_true",
-                      default=DEFAULTS["enforce_linear"]["lut_enable"])
-    lin.add_argument("--no-lut-enable", dest="lut_enable", action="store_false")
-    lin.add_argument("--exposure-mode", choices=["Timed"], default=DEFAULTS["enforce_linear"]["exposure_mode"])
-
-    bl = parser.add_argument_group("Black level")
-    bl.add_argument("--black-level-mode", choices=["keep_and_record", "set_zero"],
-                     default=DEFAULTS["black_level"]["mode"])
-    bl.add_argument("--black-level-value", type=int, default=DEFAULTS["black_level"]["value"],
-                     help="CHUA wired-up (xem canh bao khi chay).")
-
-    roi = parser.add_argument_group("ROI")
-    roi.add_argument("--roi-width", type=int, default=DEFAULTS["roi"]["width"], help="Bo trong = full sensor.")
-    roi.add_argument("--roi-height", type=int, default=DEFAULTS["roi"]["height"], help="Bo trong = full sensor.")
-    roi.add_argument("--roi-x-offset", type=int, default=DEFAULTS["roi"]["x_offset"])
-    roi.add_argument("--roi-y-offset", type=int, default=DEFAULTS["roi"]["y_offset"])
+    site = parser.add_argument_group("Site (dat mot lan luc lap dat, co dinh sau do)")
+    site.add_argument("--exposure-us", type=float, default=DEFAULTS["site"]["exposure_us"])
+    site.add_argument("--gain-db", type=float, default=DEFAULTS["site"]["gain_db"])
+    site.add_argument("--packet-size", type=int, default=None,
+                       help="GevSCPSPacketSize. Bo trong = giu nguyen gia tri hien tai tren camera.")
+    site.add_argument("--scpd", type=int, default=None,
+                       help="GevSCPD (inter-packet delay). Bo trong = giu nguyen.")
+    site.add_argument("--persistent-ip", default=None,
+                       help="GevPersistentIPAddress, dang 'a.b.c.d'. Chi co hieu luc sau khi camera khoi dong lai.")
+    site.add_argument("--persistent-subnet", default=None, help="GevPersistentSubnetMask, dang 'a.b.c.d'.")
+    site.add_argument("--persistent-gateway", default=None, help="GevPersistentDefaultGateway, dang 'a.b.c.d'.")
+    site.add_argument("--dhcp", dest="dhcp", action="store_true", default=None,
+                       help="Bat GevCurrentIPConfigurationDHCP. Bo trong = giu nguyen.")
+    site.add_argument("--no-dhcp", dest="dhcp", action="store_false")
+    site.add_argument("--persistent-ip-mode", dest="persistent_ip_mode", action="store_true", default=None,
+                       help="Bat GevCurrentIPConfigurationPersistentIP. Bo trong = giu nguyen.")
+    site.add_argument("--no-persistent-ip-mode", dest="persistent_ip_mode", action="store_false")
+    site.add_argument("--do-not-fragment", dest="do_not_fragment", action="store_true", default=None,
+                       help="Bat GevSCPSDoNotFragment. Bo trong = giu nguyen.")
+    site.add_argument("--no-do-not-fragment", dest="do_not_fragment", action="store_false")
+    site.add_argument("--heartbeat-timeout-ms", type=int, default=None,
+                       help="GevHeartbeatTimeout(ms). Bo trong = giu nguyen.")
 
     out = parser.add_argument_group("Output")
     out.add_argument("--outdir", default=DEFAULTS["output"]["dir"])
@@ -531,10 +569,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     out.add_argument("--metadata", dest="metadata", action="store_true",
                       default=DEFAULTS["output"]["write_metadata_json"])
     out.add_argument("--no-metadata", dest="metadata", action="store_false")
-
-    net = parser.add_argument_group("Network")
-    net.add_argument("--packet-size", type=int, default=DEFAULTS["network"]["packet_size"],
-                      help="CHUA wired-up (xem canh bao khi chay).")
 
     log_grp = parser.add_argument_group("Logging")
     log_grp.add_argument("--log-dir", default=DEFAULTS["logging"]["dir"],
