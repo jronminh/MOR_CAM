@@ -1,39 +1,39 @@
-# MOR CAM - PoC dua camera GigE vao hoat dong
+# MOR CAM - PoC bringing a GigE camera into operation
 
-Camera: **Hikrobot MV-CE200-10GM** (sensor Sony IMX183, 20MP mono, GigE Vision, PoE).
-Dac ta day du: `reference/poc_camera_bringup_spec.md`. Cac file:
+Camera: **Hikrobot MV-CE200-10GM** (Sony IMX183 sensor, 20MP mono, GigE Vision, PoE).
+Full spec: `reference/poc_camera_bringup_spec.md`. Files:
 
-| File | Vai tro |
+| File | Role |
 |---|---|
-| `gev_camera.py` | Module dung chung: ket noi harvesters, cac patch bat buoc cho MvProducerGEV.cti, ham set/doc node co xac minh read-back. |
-| `camera_info.py` | Dump toan bo node map (chi doc) - **chay truoc tien** khi dem camera moi/firmware moi ve. |
-| `capture.py` | Chuong trinh chinh: ep thong so linearity-critical, chup mot khung, luu anh + metadata. Co subcommand `focus`. |
-| `focus.py` | Che do canh net truc tiep (goi tu `capture.py focus`). |
-| `gui.py` | GUI Tkinter don gian: theo doi trang thai, chinh thong so, an chup, xem preview - lop mong tren `capture.py`, khong viet lai logic. |
-| `config.yaml` | Cau hinh mau, **da dien gia tri that** xac minh tren camera serial `00F67674995`, firmware `V3.1.1 200717`. |
-| `node_map_full.json` | Dump verbatim toan bo 2997 node cua camera that (nguon tra cuu ten node). |
-| `reference/` | Tai lieu tham khao: `camera_report.md` (tom tat node quan trong + doi chung datasheet), `capture_bindings_and_issues.md` (ghi chu ky thuat: ten node dung de set, van de BlackLevel, binding khong on-sensor), `poc_camera_bringup_spec.md` (dac ta goc), `claude_code_task_dump_nodemap.md` (nhiem vu dump node map ban dau). |
+| `gev_camera.py` | Shared module: harvesters connection, mandatory patches for MvProducerGEV.cti, node set/read helpers with read-back verification. |
+| `camera_info.py` | Dumps the full node map (read-only) - **run this first** when a new camera/firmware arrives. |
+| `capture.py` | Main program: enforces linearity-critical settings, captures one frame, saves image + metadata. Has a `focus` subcommand. |
+| `focus.py` | Live focusing mode (invoked via `capture.py focus`). |
+| `gui.py` | Simple Tkinter GUI: connection status, parameter editing, capture button, preview - a thin layer over `capture.py`, no duplicated logic. |
+| `config.yaml` | Sample config, **filled with real values** verified on camera serial `00F67674995`, firmware `V3.1.1 200717`. |
+| `node_map_full.json` | Verbatim dump of all 2997 nodes from the real camera (lookup source for node names). |
+| `reference/` | Reference docs: `camera_report.md` (summary of key nodes + datasheet cross-check), `capture_bindings_and_issues.md` (technical notes: node names used for setting values, BlackLevel issue, non-on-sensor binning), `poc_camera_bringup_spec.md` (original spec), `claude_code_task_dump_nodemap.md` (original node-map-dump task). |
 
-## 1. Cai dat
+## 1. Setup
 
-### 1.1 Yeu cau bat buoc
-- **Python 3.10 hoac 3.11.** `harvesters` chi co wheel bien san toi CPython 3.11. Da xac minh trong du an nay: Python 3.11.16, `harvesters==1.4.3`, `genicam==1.5.1` (tu dong keo theo).
-- Da cai **Hikrobot MVS SDK** (co `MvProducerGEV.cti`).
-- Camera va host **khac subnet IP** (vd camera `192.168.100.253`, host `192.168.100.2`), da cap nguon PoE hoac 12VDC.
+### 1.1 Hard requirements
+- **Python 3.10 or 3.11.** `harvesters` only ships prebuilt wheels up to CPython 3.11. Verified in this project: Python 3.11.16, `harvesters==1.4.3`, `genicam==1.5.1` (pulled in automatically).
+- **Hikrobot MVS SDK** installed (provides `MvProducerGEV.cti`).
+- Camera and host on **different IP subnets** (e.g. camera `192.168.100.253`, host `192.168.100.2`), powered via PoE or 12VDC.
 
 ### 1.2 Windows
 
 ```powershell
-# tao venv rieng, PIN dung Python 3.10/3.11 (vi du dung conda):
+# create a dedicated venv, PIN to Python 3.10/3.11 (e.g. via conda):
 conda create -n cam311 python=3.11
 conda activate cam311
 pip install -r requirements.txt
 ```
 
-`.cti` duoc tu dong dinh vi qua bien moi truong `GENICAM_GENTL64_PATH` (do bo cai MVS SDK
-thiet lap san) hoac cac duong dan cai dat mac dinh. Da xac minh tren may nay:
+The `.cti` file is located automatically via the `GENICAM_GENTL64_PATH` environment variable
+(set up by the MVS SDK installer) or default install paths. Verified on this machine:
 `C:\Program Files (x86)\Common Files\MVS\Runtime\Win64_x64\MvProducerGEV.cti`.
-Neu khac, dien vao `config.yaml` -> `gentl.cti_windows`.
+If different, fill it in under `config.yaml` -> `gentl.cti_windows`.
 
 ### 1.3 Linux
 
@@ -43,37 +43,41 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**CHUA xac minh duong dan `.cti` tren Linux** (du an nay phat trien tren Windows). Sau khi
-cai MVS SDK cho Linux, dinh vi `MvProducerGEV.cti` that (thuong o `/opt/MVS/lib/64/`) va dien
-vao `config.yaml` -> `gentl.cti_linux`. Tren Linux, dat MTU cua NIC >= packet size (vd 9000)
-de tranh mat goi o full-res - xem `reference/capture_bindings_and_issues.md` muc 5.
+**The `.cti` path on Linux has NOT been verified** (this project was developed on Windows).
+After installing the MVS SDK for Linux, locate the real `MvProducerGEV.cti` (usually under
+`/opt/MVS/lib/64/`) and fill it in under `config.yaml` -> `gentl.cti_linux`. On Linux, set the
+NIC's MTU >= packet size (e.g. 9000) to avoid packet loss at full resolution - see
+`reference/capture_bindings_and_issues.md` section 5.
 
-### 1.4 Kiem tra ket noi
+### 1.4 Connection check
 
 ```bash
 python camera_info.py
 ```
 
-Chi doc, khong doi setting nao. In ra model/serial/firmware va xuat `node_map_full.json` +
-`camera_report.md`. Neu khong dò duoc thiet bi, script se in ro cac nguyen nhan thuong gap
-(sai duong dan `.cti`, trung IP host/camera, chua cap nguon, sai subnet, firewall).
+Read-only, changes no settings. Prints model/serial/firmware and exports
+`node_map_full.json` + `camera_report.md`. If the device isn't discovered, the script prints
+the common causes clearly (wrong `.cti` path, host/camera IP collision, no power, wrong
+subnet, firewall).
 
-## 2. Chup mot anh
+## 2. Capturing one image
 
 ```bash
 python capture.py capture --config config.yaml
 ```
 
-Trinh tu: ket noi -> ep + xac minh read-back Gamma/AutoExposure/AutoGain/LUT (**dung neu bat
-ky thong so nao khong ve dung trang thai**, khong chup) -> ap dung pixel format/exposure/
-gain/binning/ROI (co xac minh) -> chup mot khung (`AcquisitionMode=SingleFrame`, khong
-streaming lien tuc) -> luu `captures/<timestamp>.tiff` + `captures/<timestamp>.json`.
+Sequence: connect -> enforce + verify read-back of Gamma/AutoExposure/AutoGain/LUT (**abort
+if any setting doesn't land in the expected state**, no capture) -> apply pixel
+format/exposure/gain/binning/ROI (with verification) -> capture one frame
+(`AcquisitionMode=SingleFrame`, no continuous streaming) -> save
+`captures/<timestamp>.tiff` + `captures/<timestamp>.json`.
 
-Mono8 luu 8-bit, Mono10/Mono12 (unpacked) luu 16-bit TIFF giu nguyen gia tri ADC that
-(khong scale, khong cat ve 8-bit). **`Mono10Packed`/`Mono12Packed` chua duoc ho tro** (xem
-muc 4) - dung ban unpacked, day cung la khuyen nghi cua dac ta goc.
+Mono8 is saved as 8-bit; Mono10/Mono12 (unpacked) are saved as 16-bit TIFF preserving the
+real ADC values (no scaling, no truncation to 8-bit). **`Mono10Packed`/`Mono12Packed` are not
+supported yet** (see section 4) - use the unpacked variant, which is also what the original
+spec recommends.
 
-Vi du metadata that (da chup Mono12 full-res tren camera nay):
+Example of real metadata (captured Mono12 at full resolution on this camera):
 
 ```json
 {
@@ -85,114 +89,122 @@ Vi du metadata that (da chup Mono12 full-res tren camera nay):
 }
 ```
 
-### File log
+### Log file
 
-Moi lan chay `capture.py capture` hoac `capture.py focus`, ngoai console (muc INFO, gon)
-con ghi mot **file log rieng cho lan chay do** vao `logs/<command>_<timestamp>.log`
-(muc DEBUG, co timestamp + ten module). File nay ghi ca cac dong console khong in ra, vi du
-so lan `fetch_buffer_retrying()` phai thu lai do loi UnicodeDecodeError cua
-`MvProducerGEV.cti` (muc 5.1) - huu ich khi debug loi khong on dinh sau nay ma khong can bat
-lai tay. Tat file log bang `--log-dir ""`, hoac doi thu muc bang `--log-dir DIR` hoac
-`logging.dir` trong config.yaml. `logs/` khong duoc dua vao git (xem `.gitignore`).
+Every run of `capture.py capture` or `capture.py focus`, besides console output (INFO level,
+terse), also writes a **run-specific log file** to `logs/<command>_<timestamp>.log` (DEBUG
+level, with timestamps + module names). This file records lines not printed to console, such
+as the number of retries `fetch_buffer_retrying()` had to perform due to
+`MvProducerGEV.cti`'s UnicodeDecodeError bug (section 5.1) - useful for debugging intermittent
+issues later without re-enabling verbose logging by hand. Disable the log file with
+`--log-dir ""`, or change the directory with `--log-dir DIR` or `logging.dir` in config.yaml.
+`logs/` is not tracked in git (see `.gitignore`).
 
-## 3. GUI don gian
+## 3. Simple GUI
 
 ```bash
 python gui.py --config config.yaml
 ```
 
-Cua so gom: trang thai ket noi + model/serial/firmware, cac o chinh pixel format/exposure/
-gain/binning/black level/thu muc luu, nut **Chup anh**, khung preview anh vua chup (downscale
-8x, hien qua PNG), va panel log. Bam Chup se chay dung trinh tu nhu `capture.py capture`:
-enforce_linear -> apply_adjustable -> single_capture -> save_image - **dung lai chinh cac ham
-da test trong `capture.py`, khong co logic rieng**. Chup chay trong thread nen de khong treo
-cua so (anh full-res Mono12 mat khoang 1-2 giay qua GigE).
+The window shows: connection status + model/serial/firmware, fields for pixel
+format/exposure/gain/binning/black level/save directory, a **Capture** button, a preview of
+the last captured image (downscaled 8x, shown as PNG), and a log panel. Capture runs the exact
+same sequence as `capture.py capture`: enforce_linear -> apply_adjustable -> single_capture ->
+save_image - **it reuses the same functions already tested in `capture.py`, with no separate
+logic**. Capture runs on a background thread so the window doesn't freeze (a full-res Mono12
+image takes about 1-2 seconds over GigE).
 
-**Da test bang cach lai chuong trinh qua code** (ket noi that, bam nut Chup that, chup thanh
-cong tren camera that, preview PNG tao thanh cong) nhung **chua the xac nhan bang mat** giao
-dien hien thi dung nhu mong doi (khong co man hinh de kiem tra truc quan trong qua trinh phat
-trien) - ban nen tu mo thu truoc khi dung that.
+**Tested by driving the program through code** (real connection, real button click, real
+capture succeeded on the real camera, preview PNG generated successfully) but **visual
+confirmation of the UI rendering as expected is still pending** (no display was available to
+check it visually during development) - try it yourself before relying on it.
 
-Tren Linux, tkinter co the can cai rieng: `sudo apt install python3-tk` (khong co trong
-`requirements.txt` vi la module chuan cua Python, khong phai goi pip).
+On Linux, tkinter may need a separate install: `sudo apt install python3-tk` (not listed in
+`requirements.txt` since it's a Python standard-library module, not a pip package).
 
-## 4. Canh net truc tiep
+## 4. Live focusing
 
 ```bash
-python capture.py focus --config config.yaml            # mode=auto: tu chon gui/headless
+python capture.py focus --config config.yaml            # mode=auto: picks gui/headless automatically
 python capture.py focus --config config.yaml --mode headless_score
 ```
 
-Streaming lien tuc nhung gioi han tai (`fps_limit`, `downscale` trong config) - **chi dung
-khi co nguoi thao tac**, khong dung cho van hanh khong nguoi truc. Diem sac net = variance
-of Laplacian.
+Continuous streaming but rate-limited (`fps_limit`, `downscale` in config) - **only for use
+while an operator is present**, not for unattended operation. Sharpness score = variance of
+Laplacian.
 
-- `headless_score`: in `sharpness=...` ra stdout moi frame, ghi de anh preview thu nho vao
-  `preview_image_path` moi giay - **da test thuc te tren camera that**.
-- `gui`: mo cua so `cv2.imshow`, nhan `q`/Esc de thoat - **chua the xac nhan bang mat** trong
-  qua trinh phat trien nay (khong co man hinh de kiem tra truc quan); code da chay het
-  nhanh logic (khong loi) nhung ban nen tu kiem tra cua so hien thi dung truoc khi dung that.
+- `headless_score`: prints `sharpness=...` to stdout every frame, overwrites the downscaled
+  preview image at `preview_image_path` every second - **tested for real on the actual
+  camera**.
+- `gui`: opens a `cv2.imshow` window, press `q`/Esc to quit - **visual confirmation still
+  pending** during this development cycle (no display was available to check it visually);
+  the code ran through the full logic path with no errors, but verify the window renders
+  correctly yourself before relying on it.
 
-## 5. Van de da biet va cach xu ly
+## 5. Known issues and workarounds
 
-### 5.1 `MvProducerGEV.cti` (V3.1.1 200717) tra ve du lieu khong phai UTF-8 hop le
+### 5.1 `MvProducerGEV.cti` (V3.1.1 200717) returns invalid UTF-8 data
 
-Xac minh truc tiep tren camera that (khong doan). Ba diem crash rieng biet trong
-`harvesters`/`genicam`, deu da xu ly trong `gev_camera.py`:
+Verified directly on the real camera (not guessed). Three separate crash points in
+`harvesters`/`genicam`, all handled in `gev_camera.py`:
 
-1. Doc node map cua **local TL device** (truoc khi cham toi node map camera that) -> vong
-   qua bang cach coi nhu local device khong co URL (khong anh huong node map that).
-2. `ImageAcquirer` **dang ky module event** (System/Interface/Device) -> vong qua bang cach
-   coi UnicodeDecodeError nhu "event khong duoc ho tro" (harvesters da co san nhanh xu ly
-   nay cho NotImplementedException, chi can chuyen doi loai loi).
-3. **Fetch buffer anh dau tien** sau `ia.start()` -> khac ban chat, khong the patch (loi nam
-   trong ham C++ da bien dich cua `genicam`, xay ra truoc khi buffer duoc gan). Da do thuc
-   nghiem: fail 0 den ~19 lan roi thanh cong binh thuong, khong lien quan kich thuoc/noi dung
-   anh. Xu ly bang **retry ngay lap tuc** (khong restart acquisition) trong
-   `gev_camera.fetch_buffer_retrying()`, gioi han theo tong thoi gian thay vi so lan.
+1. Reading the node map of the **local TL device** (before ever touching the real camera's
+   node map) -> worked around by treating the local device as having no URL (does not affect
+   the real node map).
+2. `ImageAcquirer` **registering module events** (System/Interface/Device) -> worked around by
+   treating UnicodeDecodeError as "event not supported" (harvesters already has a fast path
+   for NotImplementedException, so only the error type needs converting).
+3. **Fetching the first image buffer** after `ia.start()` -> different in nature, cannot be
+   patched (the error is inside a compiled C++ function of `genicam`, occurring before the
+   buffer is assigned). Empirically measured: fails 0 to ~19 times before succeeding normally,
+   unrelated to image size/content. Handled with **immediate retry** (no acquisition restart)
+   in `gev_camera.fetch_buffer_retrying()`, bounded by total elapsed time rather than a retry
+   count.
 
-`camera_info.py` chi can patch (1) vi khong dung `ImageAcquirer`. `capture.py`/`focus.py`
-can ca ba.
+`camera_info.py` only needs patch (1) since it doesn't use `ImageAcquirer`. `capture.py`/
+`focus.py` need all three.
 
-### 5.2 Binning khong phai on-sensor
+### 5.2 Binning is not on-sensor
 
-`BinningSelector` chi co entry `Region0` kha dung (`Sensor` co access `NI`). Nghia la
-`BinningHorizontal2`/`BinningVertical2` la **gop pixel digital sau ADC**, khong phai gop
-dien tich tren cam bien - khong cai thien SNR nhu binning that. `capture.py` van cho phep
-bat (ghi log canh bao ro) nhung khong nen trong cay vao no de tang SNR vat moc xa.
+`BinningSelector` only has `Region0` available (`Sensor` has access `NI`). This means
+`BinningHorizontal2`/`BinningVertical2` are **digital pixel combining after the ADC**, not
+combining sensor area before it - it does not improve SNR the way real binning does.
+`capture.py` still allows enabling it (with a clear warning logged) but it should not be
+relied on to improve SNR down the line.
 
 ### 5.3 BlackLevel = 200 (pedestal)
 
-Mac dinh camera cong offset 200 DN (thang 0-4095) vao moi pixel (`BlackLevelEnable=True`).
-Offset nay **khong triet tieu trong do tuong phan Weber**. `capture.py` mac dinh
-(`black_level.mode: keep_and_record`) giu nguyen va ghi vao moi file metadata; buoc
-calibration sau (dark frame) phai tru gia tri nay. Doi `mode: set_zero` trong config neu
-muon dat ve 0 (chua kiem chung anh huong toi tuyen tinh o che do nay).
+By default the camera adds a 200 DN offset (0-4095 scale) to every pixel
+(`BlackLevelEnable=True`). This offset is **not cancelled out in Weber contrast**.
+`capture.py` defaults (`black_level.mode: keep_and_record`) to keeping it as-is and recording
+it in every metadata file; a later calibration step (dark frame) must subtract this value.
+Change `mode: set_zero` in config to set it to 0 (its effect on linearity in this mode has not
+been verified).
 
 ### 5.4 Noise reduction
 
-Cac node lien quan (`DigitalNoiseReductionMode`, `NoiseReduction`, `TZDenoiseOpen`, ...) deu
-co access `NI`/`NA` tren firmware nay - khong set duoc va khong co gi de tat. `capture.py`
-coi day la **binh thuong, khong phai loi** (ISP khong co pipeline noise reduction hoat dong
-de lo).
+The related nodes (`DigitalNoiseReductionMode`, `NoiseReduction`, `TZDenoiseOpen`, ...) all
+have access `NI`/`NA` on this firmware - they cannot be set and there is nothing to disable.
+`capture.py` treats this as **expected, not a bug** (the ISP has no active noise-reduction
+pipeline to expose).
 
-## 6. Doi chung datasheet (tom tat, chi tiet o `reference/camera_report.md`)
+## 6. Datasheet cross-check (summary; full detail in `reference/camera_report.md`)
 
-| Thong so | Datasheet | Do tu node map | Ket luan |
+| Parameter | Datasheet | Read from node map | Conclusion |
 |---|---|---|---|
-| Do phan giai | 5472x3648 (20MP) | 5472x3648 | khop |
-| Dai exposure | ~46us - 2s | 46 - 2,000,000 us | khop |
-| Pixel format | Mono 8/10/10p/12/12p | Mono8/10/10Packed/12/12Packed | khop tap gia tri; ten khac SFNC chuan (`...Packed` khong phai `...p`) |
-| Giao tiep | GigE | DeviceLinkSpeed=1000 Mbps | khop |
-| Model | MV-CE200-10GM | MV-CE200-10GM | khop |
-| Nguon PoE/12VDC, 0~50C | co | khong co node de doc lai | xac minh bang datasheet/do thuc te |
+| Resolution | 5472x3648 (20MP) | 5472x3648 | matches |
+| Exposure range | ~46us - 2s | 46 - 2,000,000 us | matches |
+| Pixel format | Mono 8/10/10p/12/12p | Mono8/10/10Packed/12/12Packed | value set matches; naming differs from standard SFNC (`...Packed` instead of `...p`) |
+| Interface | GigE | DeviceLinkSpeed=1000 Mbps | matches |
+| Model | MV-CE200-10GM | MV-CE200-10GM | matches |
+| Power PoE/12VDC, 0~50C | yes | no node to read back | verify via datasheet/physical testing |
 
-## 7. Chua lam trong PoC nay
+## 7. Not done in this PoC
 
-- Giai nen `Mono10Packed`/`Mono12Packed` (dung ban unpacked de thay the).
-- Xac minh `.cti` tren Linux (chi test tren Windows).
-- Xac nhan bang mat che do `focus --mode gui` va giao dien `gui.py` (da test logic bang cach
-  lai chuong trinh qua code, chua xac nhan hien thi truc quan dung nhu mong doi).
-- Dark frame / flat frame calibration, kiem chung tuyen tinh bang chuoi exposure, trigger
-  phan cung, truyen du lieu LTE, tinh MOR - deu ngoai pham vi PoC nay (xem
-  `reference/poc_camera_bringup_spec.md` muc 2).
+- Decoding `Mono10Packed`/`Mono12Packed` (use the unpacked variant instead).
+- Verifying the `.cti` path on Linux (only tested on Windows).
+- Visual confirmation of `focus --mode gui` and the `gui.py` interface (logic tested by
+  driving the program through code, visual rendering not yet confirmed as expected).
+- Dark frame / flat frame calibration, linearity verification via an exposure sweep, hardware
+  triggering, LTE data transmission, MOR computation - all out of scope for this PoC (see
+  `reference/poc_camera_bringup_spec.md` section 2).

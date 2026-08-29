@@ -1,3 +1,6 @@
+## Language
+- Source code, comments, docstrings, and commit messages are entirely in English.
+
 ## Approach
 - Read existing files before writing. Don't re-read unless changed.
 - Thorough in reasoning, concise in output.
